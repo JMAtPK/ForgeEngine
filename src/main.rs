@@ -1,4 +1,7 @@
+#[allow(dead_code)]
+mod contract;
 mod gpu;
+#[allow(dead_code)]
 mod schema;
 
 use clap::{Parser, Subcommand};
