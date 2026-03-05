@@ -1,0 +1,13 @@
+{
+  "name": "simple_pipeline",
+  "design_params": "test_design",
+  "pipeline": [
+    {
+      "name": "identity_step",
+      "kernel": "identity",
+      "depends_on": [],
+      "consumes": ["EntityBuffer"],
+      "produces": ["EntityBuffer"]
+    }
+  ]
+}

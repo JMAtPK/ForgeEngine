@@ -9,12 +9,12 @@ use crate::schema::{
     generate_random_buffer, generate_adversarial_buffers,
 };
 use rquickjs::{Context, Function, Object, Runtime};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 // ===== Contract Data Types =====
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum BufferAccess {
     Read,
@@ -23,14 +23,14 @@ pub enum BufferAccess {
     ReadWrite,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct BufferBinding {
     pub binding: u32,
     pub schema: String,
     pub access: BufferAccess,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct KernelContractJSON {
     pub name: String,
     pub wgsl_path: Option<String>,
@@ -53,7 +53,7 @@ pub struct DispatchResult {
     pub inputs_post: Vec<Vec<u8>>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct VerificationResult {
     pub accepted: bool,
     pub errors: Vec<String>,

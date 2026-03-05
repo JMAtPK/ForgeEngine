@@ -1,0 +1,13 @@
+{
+  "name": "missing_kernel_pipeline",
+  "design_params": "test_design",
+  "pipeline": [
+    {
+      "name": "step_a",
+      "kernel": "nonexistent_kernel",
+      "depends_on": [],
+      "consumes": ["EntityBuffer"],
+      "produces": ["EntityBuffer"]
+    }
+  ]
+}

@@ -1,10 +1,12 @@
-#[allow(dead_code)]
+mod bundle;
 mod contract;
+mod dag;
 mod gpu;
-#[allow(dead_code)]
+mod registry;
 mod schema;
 
 use clap::{Parser, Subcommand};
+use std::path::PathBuf;
 use wgpu::Backends;
 
 #[derive(Parser)]
@@ -22,8 +24,22 @@ struct Cli {
 enum Command {
     /// Run GPU round-trip test
     Test,
-    /// Verify GPU availability
-    Verify,
+    /// Verify a kernel bundle
+    Verify {
+        /// Path to the bundle JSON file
+        bundle: PathBuf,
+        /// Registry directory (default: .forge/registry)
+        #[arg(long, default_value = ".forge/registry")]
+        registry: PathBuf,
+    },
+    /// Validate a DAG manifest
+    ValidateDag {
+        /// Path to the DAG manifest JSON file
+        manifest: PathBuf,
+        /// Registry directory (default: .forge/registry)
+        #[arg(long, default_value = ".forge/registry")]
+        registry: PathBuf,
+    },
     /// Run a compute job
     Run,
 }
@@ -50,8 +66,75 @@ fn main() {
                 std::process::exit(1);
             }
         }
-        Some(Command::Verify) => {
-            println!("forge verify: not yet implemented");
+        Some(Command::Verify {
+            bundle: bundle_path,
+            registry: registry_path,
+        }) => {
+            let bun = match bundle::load_bundle(&bundle_path) {
+                Ok(b) => b,
+                Err(e) => {
+                    let output = bundle::VerifyOutput {
+                        accepted: false,
+                        kernel: String::new(),
+                        registry_id: None,
+                        errors: vec![e],
+                        steps: vec![],
+                    };
+                    println!("{}", serde_json::to_string_pretty(&output).unwrap());
+                    std::process::exit(1);
+                }
+            };
+
+            let (device, queue) = gpu::init_device(backends);
+            let mut output = bundle::run_full_pipeline(&device, &queue, &bun);
+
+            if output.accepted {
+                // Read bundle content for hash
+                let content = std::fs::read_to_string(&bundle_path).unwrap_or_default();
+                let hash = bundle::bundle_hash(&content);
+                let registry_id = format!("{}_{}", output.kernel, hash);
+
+                match registry::register_kernel(
+                    &registry_path,
+                    &output.kernel,
+                    &bun.contract,
+                    &hash,
+                ) {
+                    Ok(_) => {
+                        output.registry_id = Some(registry_id);
+                    }
+                    Err(e) => {
+                        eprintln!("Warning: failed to register kernel: {}", e);
+                    }
+                }
+            }
+
+            println!("{}", serde_json::to_string_pretty(&output).unwrap());
+            if !output.accepted {
+                std::process::exit(1);
+            }
+        }
+        Some(Command::ValidateDag {
+            manifest,
+            registry: registry_path,
+        }) => {
+            let dag = match dag::load_dag_manifest(&manifest) {
+                Ok(d) => d,
+                Err(e) => {
+                    let result = dag::DagValidationResult {
+                        valid: false,
+                        errors: vec![e],
+                    };
+                    println!("{}", serde_json::to_string_pretty(&result).unwrap());
+                    std::process::exit(1);
+                }
+            };
+
+            let result = dag::validate_dag(&dag, &registry_path);
+            println!("{}", serde_json::to_string_pretty(&result).unwrap());
+            if !result.valid {
+                std::process::exit(1);
+            }
         }
         Some(Command::Run) => {
             println!("forge run: not yet implemented");

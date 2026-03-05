@@ -1,0 +1,35 @@
+{
+  "design_params": {
+    "name": "test_design",
+    "params": {
+      "max_entities": { "type": "u32", "value": 8 },
+      "boss_health": { "type": "u32", "value": 200 }
+    },
+    "design_invariants": []
+  },
+  "schemas": [
+    {
+      "name": "EntityBuffer",
+      "struct": {
+        "x_pos": { "type": "i32" },
+        "y_pos": { "type": "i32" },
+        "health": { "type": "u32", "range": [0, "$boss_health"] }
+      },
+      "capacity": "$max_entities",
+      "buffer_category": "state",
+      "invariants": []
+    }
+  ],
+  "contract": {
+    "name": "struct_mismatch",
+    "wgsl_path": "../../src/shaders/test_identity.wgsl",
+    "inputs": [
+      { "binding": 0, "schema": "EntityBuffer", "access": "read" }
+    ],
+    "outputs": [
+      { "binding": 1, "schema": "EntityBuffer", "access": "write" }
+    ],
+    "workgroup_size": 64,
+    "postconditions": []
+  }
+}

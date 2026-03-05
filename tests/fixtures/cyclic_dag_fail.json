@@ -1,0 +1,20 @@
+{
+  "name": "cyclic_pipeline",
+  "design_params": "test_design",
+  "pipeline": [
+    {
+      "name": "step_a",
+      "kernel": "identity",
+      "depends_on": ["step_b"],
+      "consumes": ["EntityBuffer"],
+      "produces": ["EntityBuffer"]
+    },
+    {
+      "name": "step_b",
+      "kernel": "identity",
+      "depends_on": [],
+      "consumes": ["EntityBuffer"],
+      "produces": ["EntityBuffer"]
+    }
+  ]
+}

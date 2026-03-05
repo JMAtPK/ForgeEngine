@@ -1,0 +1,33 @@
+{
+  "design_params": {
+    "name": "test_design",
+    "params": {
+      "max_entities": { "type": "u32", "value": 8 },
+      "boss_health": { "type": "u32", "value": 200 }
+    },
+    "design_invariants": []
+  },
+  "schemas": [
+    {
+      "name": "EntityBuffer",
+      "struct": {
+        "health": { "type": "u32", "range": [0, "$boss_health"] }
+      },
+      "capacity": "$max_entities",
+      "buffer_category": "state",
+      "invariants": []
+    }
+  ],
+  "contract": {
+    "name": "bad_wgsl",
+    "wgsl_source": "this is not valid WGSL at all !!@#$",
+    "inputs": [
+      { "binding": 0, "schema": "EntityBuffer", "access": "read" }
+    ],
+    "outputs": [
+      { "binding": 1, "schema": "EntityBuffer", "access": "write" }
+    ],
+    "workgroup_size": 64,
+    "postconditions": []
+  }
+}

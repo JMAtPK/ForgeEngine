@@ -41,7 +41,7 @@ pub fn init_device(backends: Backends) -> (wgpu::Device, wgpu::Queue) {
     .expect("No GPU adapter found. Ensure a compatible GPU and driver are available.");
 
     let info = adapter.get_info();
-    println!("GPU adapter: {} ({:?})", info.name, info.backend);
+    eprintln!("GPU adapter: {} ({:?})", info.name, info.backend);
 
     let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
         label: Some("forge"),
