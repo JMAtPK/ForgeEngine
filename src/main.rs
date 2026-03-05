@@ -1,4 +1,5 @@
 mod gpu;
+mod schema;
 
 use clap::{Parser, Subcommand};
 use wgpu::Backends;

@@ -8,3 +8,8 @@ wgpu = "25"
 pollster = "0.4"
 env_logger = "0.11"
 clap = { version = "4", features = ["derive"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = { version = "1.0.149", features = ["preserve_order"] }
+rand = "0.8"
+indexmap = { version = "2", features = ["serde"] }
+rquickjs = "0.11.0"
