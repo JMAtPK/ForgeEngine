@@ -1,0 +1,27 @@
+{
+  "name": "render_solid",
+  "registry_id": "render_solid_9ee66889",
+  "contract": {
+    "name": "render_solid",
+    "wgsl_path": "../../src/shaders/render_solid.wgsl",
+    "wgsl_source": "// Render kernel: fills Framebuffer with a cycling color pattern.\n\nstruct Globals {\n    frame_number: u32,\n    delta_time: i32,\n    world_width: i32,\n    world_height: i32,\n    random_seed: u32,\n    padding: u32,\n    padding2: u32,\n    padding3: u32,\n}\n\nstruct Pixel {\n    pixel: u32,\n}\n\n@group(0) @binding(0) var<storage, read> globals: array<Globals>;\n@group(0) @binding(1) var<storage, read_write> framebuffer: array<Pixel>;\n\n@compute @workgroup_size(64)\nfn main(@builtin(global_invocation_id) gid: vec3u) {\n    let idx = gid.x;\n    let g = globals[0];\n    let width = u32(g.world_width >> 16);\n    let height = u32(g.world_height >> 16);\n    let total = width * height;\n    if (idx >= total) { return; }\n\n    let x = idx % width;\n    let y = idx / width;\n\n    let phase = g.frame_number / 2u;\n    let r = (x + phase) % 256u;\n    let g_ch = (y + phase) % 256u;\n    let b = (x + y + phase) % 256u;\n\n    // RGBA8: 0xAABBGGRR\n    framebuffer[idx].pixel = r | (g_ch << 8u) | (b << 16u) | (255u << 24u);\n}\n",
+    "inputs": [
+      {
+        "binding": 0,
+        "schema": "GlobalsBuffer",
+        "access": "read"
+      }
+    ],
+    "outputs": [
+      {
+        "binding": 1,
+        "schema": "Framebuffer",
+        "access": "write"
+      }
+    ],
+    "workgroup_size": 64,
+    "postconditions": []
+  },
+  "bundle_hash": "9ee66889",
+  "verified_at": "1772714441"
+}

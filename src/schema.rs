@@ -262,21 +262,40 @@ pub fn resolve_ref(val: &serde_json::Value, params: &ResolvedParams) -> Result<i
             .or_else(|| n.as_f64().map(|f| f as i64))
             .ok_or_else(|| format!("Invalid number: {}", n)),
         serde_json::Value::String(s) => {
-            if !s.starts_with('$') {
-                return s
-                    .parse::<i64>()
-                    .map_err(|_| format!("Invalid ref: {}", s));
+            if s.contains('$') {
+                return resolve_ref_expr(s, params);
             }
-            let negated = s.starts_with("$-");
-            let param_name = if negated { &s[2..] } else { &s[1..] };
-            let raw_val = params
-                .raw
-                .get(param_name)
-                .ok_or_else(|| format!("Unknown param reference: {}", s))?;
-            Ok(if negated { -raw_val } else { *raw_val })
+            s.parse::<i64>()
+                .map_err(|_| format!("Invalid ref: {}", s))
         }
         _ => Err(format!("Invalid ref value: {:?}", val)),
     }
+}
+
+fn resolve_ref_expr(expr: &str, params: &ResolvedParams) -> Result<i64, String> {
+    // Substitute $-param (negated) before $param to avoid partial matches
+    // Uses raw values (fix16-encoded) for correct range/value resolution
+    let mut js_expr = expr.to_string();
+    for (name, val) in &params.raw {
+        let neg_pattern = format!("$-{}", name);
+        js_expr = js_expr.replace(&neg_pattern, &format!("({})", -val));
+    }
+    for (name, val) in &params.raw {
+        let pattern = format!("${}", name);
+        js_expr = js_expr.replace(&pattern, &val.to_string());
+    }
+    // Check for unresolved references
+    if js_expr.contains('$') {
+        return Err(format!("Unresolved param reference in expression: {}", expr));
+    }
+    let rt = rquickjs::Runtime::new().map_err(|e| format!("QuickJS: {}", e))?;
+    let ctx = rquickjs::Context::full(&rt).map_err(|e| format!("QuickJS: {}", e))?;
+    ctx.with(|ctx| {
+        let val: f64 = ctx
+            .eval(js_expr.as_bytes())
+            .map_err(|e| format!("Expression '{}' eval failed: {}", expr, e))?;
+        Ok(val as i64)
+    })
 }
 
 fn resolve_range(

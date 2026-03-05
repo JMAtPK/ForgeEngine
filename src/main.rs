@@ -3,6 +3,7 @@ mod contract;
 mod dag;
 mod dag_runner;
 mod gpu;
+mod harness;
 mod registry;
 mod schema;
 
@@ -41,8 +42,20 @@ enum Command {
         #[arg(long, default_value = ".forge/registry")]
         registry: PathBuf,
     },
-    /// Run a compute job
-    Run,
+    /// Run a game in windowed mode
+    Run {
+        /// Path to the game manifest JSON file
+        manifest: PathBuf,
+        /// Registry directory (default: .forge/registry)
+        #[arg(long, default_value = ".forge/registry")]
+        registry: PathBuf,
+        /// Enable per-dispatch postcondition verification
+        #[arg(long)]
+        verify: bool,
+        /// PRNG seed for deterministic replay
+        #[arg(long)]
+        seed: Option<u64>,
+    },
     /// Run a DAG pipeline from a game manifest
     RunDag {
         /// Path to the game manifest JSON file
@@ -154,8 +167,13 @@ fn main() {
                 std::process::exit(1);
             }
         }
-        Some(Command::Run) => {
-            println!("forge run: not yet implemented");
+        Some(Command::Run {
+            manifest,
+            registry,
+            verify,
+            seed,
+        }) => {
+            harness::run_harness(&manifest, &registry, backends, verify, seed);
         }
         Some(Command::RunDag {
             manifest,

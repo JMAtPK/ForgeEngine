@@ -52,6 +52,29 @@ pub fn init_device(backends: Backends) -> (wgpu::Device, wgpu::Queue) {
     (device, queue)
 }
 
+pub fn init_device_for_surface(
+    instance: &wgpu::Instance,
+    surface: &wgpu::Surface<'_>,
+) -> (wgpu::Adapter, wgpu::Device, wgpu::Queue) {
+    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        power_preference: wgpu::PowerPreference::HighPerformance,
+        compatible_surface: Some(surface),
+        ..Default::default()
+    }))
+    .expect("No GPU adapter found compatible with surface");
+
+    let info = adapter.get_info();
+    eprintln!("GPU adapter: {} ({:?})", info.name, info.backend);
+
+    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+        label: Some("forge"),
+        ..Default::default()
+    }))
+    .expect("Failed to create GPU device");
+
+    (adapter, device, queue)
+}
+
 pub fn run_test_dispatch(device: &wgpu::Device, queue: &wgpu::Queue) -> Vec<u32> {
     let shader_module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("test_shader"),

@@ -22,6 +22,8 @@ pub struct GameManifest {
     pub design_params: DesignParamsJSON,
     pub schemas: Vec<BufferSchemaJSON>,
     pub pipeline: Vec<DagNode>,
+    #[serde(default)]
+    pub render_kernel: Option<String>,
 }
 
 pub fn load_game_manifest(path: &Path) -> Result<GameManifest, String> {
@@ -573,5 +575,83 @@ impl DagRunner {
             "frame": self.frame_count,
             "buffers": buffers,
         }))
+    }
+
+    pub fn device(&self) -> &wgpu::Device {
+        &self.device
+    }
+
+    pub fn queue(&self) -> &wgpu::Queue {
+        &self.queue
+    }
+
+    pub fn upload_buffer(&self, name: &str, data: &[u8]) {
+        self.pool.upload(&self.queue, name, data);
+    }
+
+    pub fn current_buffer(&self, name: &str) -> Result<&wgpu::Buffer, String> {
+        self.pool.current_buffer(name)
+    }
+
+    pub fn params(&self) -> &ResolvedParams {
+        &self.params
+    }
+
+    pub fn compile_kernel(&mut self, contract: &KernelContractJSON) -> Result<(), String> {
+        self.cache.compile(&self.device, &contract.name, contract)
+    }
+
+    pub fn dispatch_kernel(&self, encoder: &mut wgpu::CommandEncoder, name: &str) -> Result<(), String> {
+        let compiled = self.cache.get(name)
+            .ok_or_else(|| format!("Kernel '{}' not compiled", name))?;
+
+        let mut bindings: Vec<(u32, String, bool)> = Vec::new();
+        for b in &compiled.contract.inputs {
+            bindings.push((b.binding, b.schema.clone(), false));
+        }
+        for b in &compiled.contract.outputs {
+            bindings.push((b.binding, b.schema.clone(), true));
+        }
+        bindings.sort_by_key(|(binding, _, _)| *binding);
+
+        let bg_entries: Vec<wgpu::BindGroupEntry> = bindings
+            .iter()
+            .map(|(binding, schema, _is_output)| {
+                let buf = self.pool.current_buffer(schema).unwrap();
+                wgpu::BindGroupEntry {
+                    binding: *binding,
+                    resource: buf.as_entire_binding(),
+                }
+            })
+            .collect();
+
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some(&format!("{}_render_bg", name)),
+            layout: &compiled.bind_group_layout,
+            entries: &bg_entries,
+        });
+
+        // Use the largest buffer for dispatch count (covers render kernels
+        // where the output is much larger than the input)
+        let mut dispatch_elements = 1u32;
+        for b in compiled.contract.inputs.iter().chain(compiled.contract.outputs.iter()) {
+            if let Some(schema) = self.schemas.get(&b.schema) {
+                let elems = (schema.total_size as u32) / 4;
+                dispatch_elements = dispatch_elements.max(elems);
+            }
+        }
+        let workgroups = (dispatch_elements + compiled.contract.workgroup_size - 1) / compiled.contract.workgroup_size;
+
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some(name),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&compiled.pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.dispatch_workgroups(workgroups, 1, 1);
+        }
+
+        Ok(())
     }
 }

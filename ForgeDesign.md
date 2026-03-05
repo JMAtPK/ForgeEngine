@@ -2,7 +2,7 @@
 
 ## AI-Native Game Engine — Design Document
 
-**Version:** 0.8.0-draft
+**Version:** 0.9.0-draft
 **Date:** 2026-03-04
 **Author:** Jason + Claude (PhilosopherKing, Inc.)
 
@@ -83,7 +83,9 @@ Before any buffer schemas, kernels, or DAGs exist, a game declares its **design 
     "$.player_size < $.world_width && $.player_size < $.world_height",
     "fix16_mul($.max_speed, $.max_delta_time) < $.world_width",
     "fix16_mul($.max_speed, $.max_delta_time) < $.world_height",
-    "$.max_entities >= 64"
+    "$.max_entities >= 64",
+    "$.display_width % 64 === 0",
+    "$.display_height % 64 === 0"
   ]
 }
 ```
@@ -405,6 +407,17 @@ These compile to: `for each element e in buffer: evaluate expression with e's fi
 - `fail(index, message)` — report a violation with the element index and a diagnostic string. Returns a failure object that the Forge captures.
 - `$` — the resolved design parameters object. `$.world_width`, `$.max_speed`, etc.
 
+**Buffer references in postconditions.** Kernels that read/write multiple buffers access them by name in scope:
+
+- `input` / `output` — the declared write buffer's pre-dispatch snapshot and post-dispatch state. Indexed by element: `input[i].field`, `output[i].field`.
+- `globals` — the GlobalsBuffer. Single element, accessed as `globals.field` (shorthand for `globals[0].field`).
+- `input_buffer` — the InputBuffer. Single element, accessed as `input_buffer[0].field`.
+- `entities` — the EntityBuffer when it's a read-only input (e.g., in the collision kernel where EntityBuffer is read and CollisionResultBuffer is written). Indexed by element.
+- `collisions` — the CollisionResultBuffer. Indexed by element.
+- `collision_count` — the CollisionCountBuffer. Single element, accessed as `collision_count[0].count`.
+
+The naming convention: each buffer is available by its schema name in snake_case. `input` and `output` are special aliases for the kernel's declared write buffer. If a kernel writes multiple buffers, each output is accessed by name (e.g., `collisions` for CollisionResultBuffer output, with `collision_count` for CollisionCountBuffer output). The Forge injects all declared buffers into the postcondition scope based on the kernel contract's input/output declarations.
+
 **Why not a DSL?** The postcondition compiles to a JavaScript function anyway. Skipping the parser and compiler eliminates an entire infrastructure layer. The AI agent already knows JavaScript. The Forge evaluates JavaScript via an embedded QuickJS runtime. If the JavaScript postconditions become unwieldy for complex games, a readability layer can be added later — but it's an optimization, not a prerequisite.
 
 **Sandbox.** Postcondition functions run in an embedded QuickJS instance within the `forge` binary. They have no access to the filesystem, network, or global state. They receive only buffer views (as typed arrays), helpers, and design params. The Forge constructs this scope per evaluation. In game mode (`forge run`), postcondition evaluation is optional — controlled by a `--verify` flag for development-time validation. In production, the harness trusts that kernels passed the Forge and skips postcondition checks for performance.
@@ -585,6 +598,9 @@ The system must be built bottom-up, with each layer verified before the next is 
   "params": {
     "world_width":          { "type": "fix16", "value": 1280 },
     "world_height":         { "type": "fix16", "value": 720 },
+    "player_speed":         { "type": "fix16", "value": 200 },
+    "enemy_speed":          { "type": "fix16", "value": 80 },
+    "bullet_speed":         { "type": "fix16", "value": 500 },
     "max_speed":            { "type": "fix16", "value": 500 },
     "player_health":        { "type": "u32", "value": 100 },
     "enemy_health":         { "type": "u32", "value": 30 },
@@ -593,6 +609,7 @@ The system must be built bottom-up, with each layer verified before the next is 
     "bullet_health":        { "type": "u32", "value": 1 },
     "max_entities":         { "type": "u32", "value": 4096 },
     "enemy_spawn_interval": { "type": "u32", "value": 60 },
+    "shoot_cooldown":       { "type": "u32", "value": 10 },
     "player_size":          { "type": "fix16", "value": 16 },
     "enemy_size":           { "type": "fix16", "value": 12 },
     "bullet_size":          { "type": "fix16", "value": 4 },
@@ -603,12 +620,20 @@ The system must be built bottom-up, with each layer verified before the next is 
     "$.bullet_damage <= $.enemy_health",
     "$.boss_health >= $.enemy_health",
     "$.player_size < $.world_width && $.player_size < $.world_height",
+    "$.max_speed >= $.player_speed",
+    "$.max_speed >= $.enemy_speed",
+    "$.max_speed >= $.bullet_speed",
     "fix16_mul($.max_speed, $.max_delta_time) < $.world_width",
     "fix16_mul($.max_speed, $.max_delta_time) < $.world_height",
-    "$.max_entities >= 64"
+    "$.max_entities >= 64",
+    "$.shoot_cooldown >= 1",
+    "$.display_width % 64 === 0",
+    "$.display_height % 64 === 0"
   ]
 }
 ```
+
+`player_speed`, `enemy_speed`, and `bullet_speed` are separate because different entity types move at different rates. `max_speed` is the upper bound across all entity types — it governs the EntityBuffer schema's velocity range and the design invariant that nothing teleports across the world in one frame.
 
 ---
 
@@ -622,14 +647,14 @@ The system must be built bottom-up, with each layer verified before the next is 
   "struct": {
     "position":    { "type": "fix16x2", "range": [[0, "$world_width"], [0, "$world_height"]] },
     "velocity":    { "type": "fix16x2", "range": [["$-max_speed", "$max_speed"], ["$-max_speed", "$max_speed"]] },
-    "size":        { "type": "fix16", "range": [0, "$player_size"] },
+    "size":        { "type": "fix16", "range": ["$bullet_size", "$player_size"] },
     "health":      { "type": "u32", "range": [0, "$boss_health"] },
     "max_health":  { "type": "u32", "range": [0, "$boss_health"] },
     "entity_type": { "type": "u32", "enum": [0, 1, 2, 3] },
     "damage":      { "type": "u32", "range": [0, "$bullet_damage"] },
     "alive":       { "type": "u32", "enum": [0, 1] },
-    "color":       { "type": "u32", "note": "packed RGB, 8 bits per channel — not used in simulation" },
-    "padding":     { "type": "u32" }
+    "cooldown":    { "type": "u32", "range": [0, "$shoot_cooldown"] },
+    "color":       { "type": "u32", "note": "packed RGB, 8 bits per channel — render only" }
   },
   "capacity": "$max_entities",
   "buffer_category": "state",
@@ -639,12 +664,13 @@ The system must be built bottom-up, with each layer verified before the next is 
     "entity_type === 3 ? health <= $.bullet_health : true",
     "entity_type === 3 ? damage === $.bullet_damage : true",
     "entity_type === 1 ? max_health === $.player_health : true",
-    "entity_type === 2 ? max_health <= $.boss_health : true"
+    "entity_type === 2 ? max_health <= $.boss_health : true",
+    "entity_type !== 1 ? cooldown === 0 : true"
   ]
 }
 ```
 
-Entity types: 0 = inactive, 1 = player, 2 = enemy, 3 = bullet.
+Entity types: 0 = inactive, 1 = player, 2 = enemy, 3 = bullet. The `cooldown` field is only meaningful for the player (shoot cooldown timer). All other entity types have cooldown fixed at 0, enforced by invariant.
 
 ### InputBuffer
 
@@ -653,7 +679,8 @@ Entity types: 0 = inactive, 1 = player, 2 = enemy, 3 = bullet.
   "name": "InputBuffer",
   "struct": {
     "keys_down":      { "type": "u32", "range": [0, 31] },
-    "mouse_position": { "type": "fix16x2", "range": [[0, "$world_width"], [0, "$world_height"]] },
+    "mouse_x":        { "type": "fix16", "range": [0, "$world_width"] },
+    "mouse_y":        { "type": "fix16", "range": [0, "$world_height"] },
     "mouse_buttons":  { "type": "u32", "range": [0, 7] }
   },
   "capacity": 1,
@@ -661,7 +688,24 @@ Entity types: 0 = inactive, 1 = player, 2 = enemy, 3 = bullet.
 }
 ```
 
-`keys_down` is a bitfield: bit 0 = W, bit 1 = A, bit 2 = S, bit 3 = D, bit 4 = space.
+**Key bitfield:** bit 0 = W (up), bit 1 = A (left), bit 2 = S (down), bit 3 = D (right), bit 4 = space (shoot). Multiple keys can be held simultaneously.
+
+**Mouse position:** The harness converts `winit` cursor coordinates to fix16 world coordinates. For the shooter proof of concept the world and window are the same size (1280x720), so the conversion is a direct cast to fix16. If the window is resized, the harness scales the cursor position to world coordinates before writing the buffer.
+
+**Mouse buttons:** bit 0 = left, bit 1 = right, bit 2 = middle. Not used by the shooter proof of concept but present in the schema for future use.
+
+**Harness responsibility:** The harness writes the InputBuffer once per frame before the simulation pipeline runs. It polls `winit` events and maintains key/button state across frames (a key stays "down" until a release event arrives). The InputBuffer is an input-category buffer — no kernel writes to it. It is set by the CPU and read-only on the GPU.
+
+**Input-to-behavior mapping** (implemented across two kernels):
+
+The `input_to_movement` kernel reads `keys_down` and sets the player entity's velocity. The mapping is instant — no acceleration, no inertia. WASD bits map to axis values:
+
+- `dx = ((keys_down >> 3) & 1) - ((keys_down >> 1) & 1)` → D minus A → -1, 0, or 1
+- `dy = ((keys_down >> 2) & 1) - (keys_down & 1)` → S minus W → -1, 0, or 1
+
+If both dx and dy are nonzero (diagonal movement), the kernel normalizes to `$player_speed` magnitude. If only one axis is active, that axis is set to `$player_speed`. If neither is active, velocity is zero. The exact normalization for diagonal: each axis is set to `fix16_mul($player_speed, 46341)` where 46341 is fix16 for approximately 1/√2 (0.7071). This keeps diagonal speed equal to cardinal speed.
+
+The `spawn` kernel reads `keys_down` bit 4 (space) and `mouse_x`/`mouse_y`. If space is pressed AND the player's `cooldown` field is 0, the kernel spawns a bullet entity at the player's position with velocity pointing from the player toward the mouse cursor at `$bullet_speed`. It also sets the player's `cooldown` to `$shoot_cooldown`. The direction calculation uses integer math: compute dx = mouse_x - player.position_x, dy = mouse_y - player.position_y, then normalize to `$bullet_speed` magnitude. The spawn kernel also decrements the player's cooldown by 1 each frame (saturating at 0) regardless of whether a bullet is fired.
 
 ### GlobalsBuffer
 
@@ -734,14 +778,106 @@ Abbreviated contracts for each kernel in the shooter DAG. Full adversarial cases
 ### spawn
 
 - **Reads:** EntityBuffer (current), InputBuffer, GlobalsBuffer
-- **Writes:** EntityBuffer (next — copy of current with new entities spawned)
+- **Writes:** EntityBuffer (next — copy of current with new entities spawned and player cooldown updated)
 - **Dispatch:** Full `$max_entities` buffer. Block-based workgroup ownership — workgroup N writes only to indices `[N * 64, (N+1) * 64)`.
 - **Postconditions:**
 ```js
-// Existing alive entities must not be modified
+// Existing alive non-player entities must not be modified
 for (let i = 0; i < input.length; i++) {
-  if (input[i].alive === 1 && !eq(output[i], input[i]))
-    return fail(i, 'existing alive entity modified');
+  if (input[i].alive === 1 && input[i].entity_type !== 1 && !eq(output[i], input[i]))
+    return fail(i, 'existing alive non-player entity modified');
+}
+return true;
+```
+```js
+// Player entity: only cooldown may change
+for (let i = 0; i < input.length; i++) {
+  if (input[i].entity_type === 1) {
+    if (output[i].position_x !== input[i].position_x) return fail(i, 'player position changed');
+    if (output[i].position_y !== input[i].position_y) return fail(i, 'player position changed');
+    if (output[i].velocity_x !== input[i].velocity_x) return fail(i, 'player velocity changed');
+    if (output[i].velocity_y !== input[i].velocity_y) return fail(i, 'player velocity changed');
+    if (output[i].health !== input[i].health) return fail(i, 'player health changed');
+    if (output[i].alive !== input[i].alive) return fail(i, 'player alive changed');
+  }
+}
+return true;
+```
+```js
+// Player cooldown: decremented by 1 each frame (saturate at 0),
+// or set to shoot_cooldown if a bullet was fired
+const space = (input_buffer[0].keys_down >> 4) & 1;
+for (let i = 0; i < input.length; i++) {
+  if (input[i].entity_type === 1) {
+    const old_cd = input[i].cooldown;
+    const can_fire = (space === 1 && old_cd === 0);
+    const expect_cd = can_fire ? $.shoot_cooldown : max(0, old_cd - 1);
+    if (output[i].cooldown !== expect_cd)
+      return fail(i, `cooldown: expected ${expect_cd}, got ${output[i].cooldown}`);
+  }
+}
+return true;
+```
+```js
+// Bullet spawn: iff space pressed and cooldown was 0, exactly one bullet appears
+const space = (input_buffer[0].keys_down >> 4) & 1;
+let player_cd = 0;
+for (let i = 0; i < input.length; i++) {
+  if (input[i].entity_type === 1) player_cd = input[i].cooldown;
+}
+const should_fire = (space === 1 && player_cd === 0);
+let bullets_spawned = 0;
+for (let i = 0; i < output.length; i++) {
+  if (output[i].entity_type === 3 && input[i].alive === 0) bullets_spawned++;
+}
+if (should_fire && bullets_spawned !== 1)
+  return fail(-1, `should have fired: got ${bullets_spawned} bullets`);
+if (!should_fire && bullets_spawned !== 0)
+  return fail(-1, `should not have fired: got ${bullets_spawned} bullets`);
+return true;
+```
+```js
+// Spawned bullets have correct speed magnitude and originate at player position
+let player_x = 0, player_y = 0;
+for (let i = 0; i < input.length; i++) {
+  if (input[i].entity_type === 1) {
+    player_x = input[i].position_x;
+    player_y = input[i].position_y;
+  }
+}
+const speed_sq = fix16_mul($.bullet_speed, $.bullet_speed);
+for (let i = 0; i < output.length; i++) {
+  if (output[i].entity_type === 3 && input[i].alive === 0) {
+    if (output[i].position_x !== player_x || output[i].position_y !== player_y)
+      return fail(i, 'bullet not at player position');
+    const vx = output[i].velocity_x, vy = output[i].velocity_y;
+    const mag_sq = fix16_mul(vx, vx) + fix16_mul(vy, vy);
+    // Allow ±1 LSB tolerance for integer normalization rounding
+    if (abs(mag_sq - speed_sq) > 2)
+      return fail(i, `bullet speed squared ${mag_sq}, expected ${speed_sq}`);
+    if (output[i].damage !== $.bullet_damage) return fail(i, 'bullet damage wrong');
+    if (output[i].health !== $.bullet_health) return fail(i, 'bullet health wrong');
+    if (output[i].size !== $.bullet_size) return fail(i, 'bullet size wrong');
+  }
+}
+return true;
+```
+```js
+// Spawned enemies have correct attributes
+for (let i = 0; i < output.length; i++) {
+  if (output[i].entity_type === 2 && input[i].alive === 0) {
+    if (output[i].health !== $.enemy_health) return fail(i, 'enemy health wrong');
+    if (output[i].max_health !== $.enemy_health) return fail(i, 'enemy max_health wrong');
+    if (output[i].size !== $.enemy_size) return fail(i, 'enemy size wrong');
+    if (output[i].damage !== 0) return fail(i, 'enemy damage should be 0');
+    if (output[i].cooldown !== 0) return fail(i, 'enemy cooldown should be 0');
+    // Enemy velocity: must point toward player, magnitude = enemy_speed
+    const espd_sq = fix16_mul($.enemy_speed, $.enemy_speed);
+    const vx = output[i].velocity_x, vy = output[i].velocity_y;
+    const mag_sq = fix16_mul(vx, vx) + fix16_mul(vy, vy);
+    if (abs(mag_sq - espd_sq) > 2)
+      return fail(i, `enemy speed squared ${mag_sq}, expected ${espd_sq}`);
+  }
 }
 return true;
 ```
@@ -753,20 +889,11 @@ for (let i = 0; i < output.length; i++) {
 }
 return true;
 ```
-```js
-// At most one bullet spawned per frame
-let bullets = 0;
-for (let i = 0; i < output.length; i++) {
-  if (output[i].entity_type === 3 && input[i].alive === 0) bullets++;
-}
-if (bullets > 1) return fail(-1, `${bullets} bullets spawned, max 1`);
-return true;
-```
 
 ### input_to_movement
 
 - **Reads:** EntityBuffer, InputBuffer
-- **Writes:** EntityBuffer (in-place velocity update on player entity only)
+- **Writes:** EntityBuffer (velocity update on player entity only)
 - **Postconditions:**
 ```js
 // Non-player entities must not be modified
@@ -784,18 +911,24 @@ for (let i = 0; i < input.length; i++) {
     if (output[i].position_x !== input[i].position_x) return fail(i, 'player position_x changed');
     if (output[i].position_y !== input[i].position_y) return fail(i, 'player position_y changed');
     if (output[i].alive !== input[i].alive) return fail(i, 'player alive changed');
+    if (output[i].cooldown !== input[i].cooldown) return fail(i, 'player cooldown changed');
   }
 }
 return true;
 ```
 ```js
-// Player velocity magnitude must not exceed max_speed
+// Player velocity matches WASD input at player_speed
+const FIX16_INV_SQRT2 = 46341; // fix16 approximation of 1/sqrt(2)
+const keys = input_buffer[0].keys_down;
+const dx = ((keys >> 3) & 1) - ((keys >> 1) & 1); // D - A
+const dy = ((keys >> 2) & 1) - (keys & 1);         // S - W
+const diagonal = (dx !== 0 && dy !== 0);
 for (let i = 0; i < output.length; i++) {
   if (output[i].entity_type === 1) {
-    const vx = output[i].velocity_x, vy = output[i].velocity_y;
-    const mag_sq = fix16_mul(vx, vx) + fix16_mul(vy, vy);
-    const max_sq = fix16_mul($.max_speed, $.max_speed);
-    if (mag_sq > max_sq) return fail(i, `velocity magnitude squared ${mag_sq} exceeds ${max_sq}`);
+    const expect_vx = diagonal ? fix16_mul(dx * $.player_speed, FIX16_INV_SQRT2) : dx * $.player_speed;
+    const expect_vy = diagonal ? fix16_mul(dy * $.player_speed, FIX16_INV_SQRT2) : dy * $.player_speed;
+    if (output[i].velocity_x !== expect_vx) return fail(i, `velocity_x: expected ${expect_vx}, got ${output[i].velocity_x}`);
+    if (output[i].velocity_y !== expect_vy) return fail(i, `velocity_y: expected ${expect_vy}, got ${output[i].velocity_y}`);
   }
 }
 return true;
@@ -835,15 +968,8 @@ return true;
 
 - **Reads:** EntityBuffer
 - **Writes:** CollisionResultBuffer, CollisionCountBuffer
+- **Note:** EntityBuffer is read-only. The Forge's clean write checker verifies it is unmodified after dispatch.
 - **Postconditions:**
-```js
-// EntityBuffer must not be modified (read-only)
-for (let i = 0; i < input.length; i++) {
-  if (!eq(output_entities[i], input[i]))
-    return fail(i, 'entity modified by collision kernel');
-}
-return true;
-```
 ```js
 // Collision count within capacity
 if (collision_count[0].count > 8192)

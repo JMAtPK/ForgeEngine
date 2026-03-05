@@ -1,0 +1,56 @@
+{
+  "design_params": {
+    "name": "test_design",
+    "params": {
+      "world_width": { "type": "fix16", "value": 1280 },
+      "world_height": { "type": "fix16", "value": 720 },
+      "max_speed": { "type": "fix16", "value": 500 },
+      "player_health": { "type": "u32", "value": 100 },
+      "enemy_health": { "type": "u32", "value": 30 },
+      "boss_health": { "type": "u32", "value": 200 },
+      "bullet_damage": { "type": "u32", "value": 10 },
+      "bullet_health": { "type": "u32", "value": 1 },
+      "max_entities": { "type": "u32", "value": 8 },
+      "player_size": { "type": "fix16", "value": 16 },
+      "max_delta_time": { "type": "fix16", "value": 0.05 }
+    },
+    "design_invariants": []
+  },
+  "schemas": [
+    {
+      "name": "GlobalsBuffer",
+      "struct": {
+        "frame_number": { "type": "u32" },
+        "delta_time": { "type": "i32", "range": [0, 3277] },
+        "world_width": { "type": "i32", "value": "$world_width" },
+        "world_height": { "type": "i32", "value": "$world_height" },
+        "random_seed": { "type": "u32" },
+        "padding": { "type": "u32" },
+        "padding2": { "type": "u32" },
+        "padding3": { "type": "u32" }
+      },
+      "capacity": 1,
+      "buffer_category": "input"
+    },
+    {
+      "name": "Framebuffer",
+      "struct": {
+        "pixel": { "type": "u32" }
+      },
+      "capacity": 921600,
+      "buffer_category": "transient"
+    }
+  ],
+  "contract": {
+    "name": "render_solid",
+    "wgsl_path": "../../src/shaders/render_solid.wgsl",
+    "inputs": [
+      { "binding": 0, "schema": "GlobalsBuffer", "access": "read" }
+    ],
+    "outputs": [
+      { "binding": 1, "schema": "Framebuffer", "access": "write" }
+    ],
+    "workgroup_size": 64,
+    "postconditions": []
+  }
+}
