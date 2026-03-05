@@ -2,7 +2,7 @@
 
 ## AI-Native Game Engine — Design Document
 
-**Version:** 0.6.0-draft
+**Version:** 0.8.0-draft
 **Date:** 2026-03-04
 **Author:** Jason + Claude (PhilosopherKing, Inc.)
 
@@ -311,21 +311,24 @@ At the end of each frame, the DAG runner can optionally run all kernel postcondi
 
 ### 3.5 The Harness
 
-The harness is the only CPU-side code. It is deliberately minimal:
+The harness is the game-mode loop within the `forge` binary. It is deliberately minimal:
 
-- Initialize WebGPU device and swap chain.
+- Initialize `wgpu` device.
+- Open a window via `winit`. Handle input events (keyboard, mouse, resize, close).
 - Load the DAG manifest.
 - Allocate GPU buffers according to schemas (including physical double-buffer pairs managed transparently).
-- Each frame: write input buffer (keyboard/mouse/time), dispatch simulation kernels in DAG order, then dispatch the render kernel.
-- Handle window events (resize, close).
+- Each frame: write input buffer (keyboard/mouse/time), dispatch simulation kernels in DAG order, then dispatch the render kernel and present the framebuffer.
+- In development mode, optionally evaluate postconditions after each dispatch (same postcondition evaluator used during verification — same binary, same code path, controlled by a flag).
 
 The harness does not contain game logic. It does not know what kind of game is running. It is a generic DAG executor with a render step bolted on at the end. The render kernel is not part of the DAG — it is a visualization pass that reads whatever final state the simulation pipeline produced. Multiple render kernels can coexist (debug view, production view, minimap) without changing the simulation graph. The render kernel uses floating-point freely since its output (the framebuffer) does not feed back into simulation.
 
-Target size: under 500 lines of TypeScript.
-
 ### 3.6 The Forge
 
-The Forge is the contract-enforced gateway for kernels entering the system. It is the most critical component and must be built and verified first.
+The Forge is the verification mode of the `forge` binary — the contract-enforced gateway for kernels entering the system. It shares the same `wgpu` device management, schema system, buffer allocation, and WGSL compilation as the game-mode harness. It is the most critical component and must be built and verified first.
+
+The Forge embeds QuickJS for evaluating JavaScript postconditions and invariants in a sandboxed scope. In verification mode, postconditions are checked after every dispatch. In game mode, the same evaluator can optionally run for development-time validation.
+
+CLI interface: `forge verify bundle.json` → JSON result on stdout (accepted with kernel ID, or rejected with diagnostics). The AI agent (Claude Code) calls it as a subprocess.
 
 **Forge submission requirements:**
 
@@ -351,7 +354,15 @@ Every kernel submission must include:
 
 If any step fails, the kernel is **rejected** with a specific, actionable error message. If all steps pass, the kernel is **registered** and available for DAG inclusion.
 
-**The Forge verifies itself.** Before trusting the Forge to validate game kernels, the Forge's own verification logic must be tested with deliberately broken submissions: kernels that violate postconditions, kernels with mismatched bindings, kernels that write to undeclared buffers. The Forge must correctly reject all of these. This self-test suite is the bedrock of the system's integrity.
+**The Forge verifies itself.** The Forge's own verification pipeline must be tested with real GPU dispatches — not CPU-side simulations, not mocked buffers, not postcondition functions evaluated against hand-crafted arrays. Every test allocates real GPU buffers, dispatches a real WGSL compute shader, reads back real output, and evaluates postconditions through the same pipeline that runs in production. The GPU is the thing being tested. Removing it from the test removes the test's meaning.
+
+Three categories of Forge self-test:
+
+**Known-good kernels with known inputs.** Hand-craft an input buffer, hand-compute the expected output, dispatch the kernel on the GPU, read back, verify all postconditions pass. Example: movement kernel, one entity at position (100, 100) with velocity (10, 0) and delta_time 1 — expected output is (110, 100). This confirms the kernel does what its contract says.
+
+**Known-bad kernels.** Write WGSL that deliberately violates its contract: a movement kernel that doesn't clamp to world bounds, a spawn kernel that overwrites alive entities, a collision kernel that modifies the entity buffer. Compile the bad WGSL, dispatch it on the GPU, read back whatever it produces, and confirm the Forge rejects it through the real verification pipeline. If the Forge accepts a broken kernel, the Forge is broken. Do not test this category by evaluating postcondition JavaScript against hand-crafted output arrays — that tests the postcondition function, not the Forge.
+
+**Adversarial inputs on good kernels.** Generate inputs at the boundaries of the valid schema range: all `$max_entities` slots alive, all entities at world edges with max velocity, zero alive entities, single entity at origin with zero velocity. Dispatch on the GPU, read back, verify all postconditions hold. These find real bugs in kernels that work fine on typical inputs.
 
 ### 3.7 Postconditions and Invariants
 
@@ -394,9 +405,9 @@ These compile to: `for each element e in buffer: evaluate expression with e's fi
 - `fail(index, message)` — report a violation with the element index and a diagnostic string. Returns a failure object that the Forge captures.
 - `$` — the resolved design parameters object. `$.world_width`, `$.max_speed`, etc.
 
-**Why not a DSL?** The postcondition compiles to a JavaScript function anyway. Skipping the parser and compiler eliminates an entire infrastructure layer. The AI agent already knows JavaScript. The Forge already runs in TypeScript. If the JavaScript postconditions become unwieldy for complex games, a readability layer can be added later — but it's an optimization, not a prerequisite.
+**Why not a DSL?** The postcondition compiles to a JavaScript function anyway. Skipping the parser and compiler eliminates an entire infrastructure layer. The AI agent already knows JavaScript. The Forge evaluates JavaScript via an embedded QuickJS runtime. If the JavaScript postconditions become unwieldy for complex games, a readability layer can be added later — but it's an optimization, not a prerequisite.
 
-**Sandbox.** Postcondition functions run in a restricted scope with no access to the filesystem, network, or global state. They receive only buffer views, helpers, and design params. The Forge constructs this scope per evaluation.
+**Sandbox.** Postcondition functions run in an embedded QuickJS instance within the `forge` binary. They have no access to the filesystem, network, or global state. They receive only buffer views (as typed arrays), helpers, and design params. The Forge constructs this scope per evaluation. In game mode (`forge run`), postcondition evaluation is optional — controlled by a `--verify` flag for development-time validation. In production, the harness trusts that kernels passed the Forge and skips postcondition checks for performance.
 
 ---
 
@@ -464,78 +475,92 @@ Adversarial cases do NOT include out-of-range garbage (NaN, negative health, pos
 
 ## 5. Bootstrap Sequence
 
-The system must be built bottom-up, with each layer verified before the next is built on top of it. The early layers are small enough for human code review. Later layers are validated by the Forge itself.
+The system must be built bottom-up, with each layer verified before the next is built on top of it. Every phase produces code within the same Rust codebase. `cargo build` always produces one binary: `forge`.
 
-### Phase 0: The WebGPU Harness
+### Phase 0: GPU Foundation
 
-**Goal:** Prove that we can create a GPU device, allocate a buffer, dispatch a trivial compute shader, read back results, and present a framebuffer.
-
-**Deliverables:**
-
-- Minimal TypeScript/WebGPU application.
-- A trivial compute shader that writes known values to a buffer.
-- CPU-side readback confirming the values are correct.
-- A fullscreen quad (or compute-written framebuffer) displaying a solid color to prove the display path works.
-
-**Verification:** Human reads every line. Under 300 lines total.
-
-### Phase 1: Design Parameters and Schema System
-
-**Goal:** Define game design parameters and constrained buffer schemas. Validate that design invariants hold and that buffer contents conform to schema constraints.
+**Goal:** Prove that the binary can create a `wgpu` device, allocate a buffer, dispatch a trivial compute shader, and read back correct results.
 
 **Deliverables:**
 
-- Design parameter format (JSON) with `$`-reference resolution.
-- Design invariant checker — validates relationships between parameters.
-- Constrained schema definition format (JSON) with value ranges, enums, and inter-field invariants.
-- TypeScript functions to: resolve `$`-references in schemas against design parameters, create a GPU buffer from a resolved schema, validate a CPU-side ArrayBuffer against a schema (type, range, and invariant checks), generate a buffer filled with valid random data within schema constraints, generate adversarial buffers (boundary values within constraints, discrete field exhaustion).
-- Test suite proving validation catches: wrong byte length, out-of-range values, invariant violations, broken design invariants.
+- Rust project with `wgpu` dependency. `cargo build` produces the `forge` binary.
+- A trivial compute shader (hardcoded WGSL string) that writes known values to a buffer.
+- GPU dispatch and CPU-side readback confirming the values are correct.
+- Backend selection: auto-detect Vulkan/Metal/D3D12, with CLI flag to force a specific backend or fall back to OpenGL.
 
-**Verification:** Human reviews. Schema system is pure TypeScript, no GPU dependency. Under 700 lines.
+**Verification:** Human reviews. `cargo test` runs the GPU round trip. Under 300 lines of Rust.
+
+### Phase 1: Schema System
+
+**Goal:** Parse JSON design parameters and constrained buffer schemas. Validate that design invariants hold and that buffer contents conform to schema constraints.
+
+**Deliverables:**
+
+- JSON parsing for design parameters, design invariants, and constrained schemas.
+- Design invariant checker — evaluates JavaScript invariant expressions via embedded QuickJS with `$` (design params) in scope.
+- Schema validation: type checks, range checks, per-element invariant evaluation.
+- Buffer generation: create a buffer filled with valid random data within schema constraints.
+- Adversarial buffer generation: boundary values within constraints, discrete field exhaustion.
+- `cargo test` suite proving validation catches: wrong byte length, out-of-range values, invariant violations, broken design invariants.
+
+**Verification:** Human reviews. Under 1000 lines of Rust.
 
 ### Phase 2: Contract Checker
 
-**Goal:** Given a kernel contract (declared I/O, postconditions as JavaScript), dispatch the kernel and verify the contract holds.
+**Goal:** Given a kernel contract (declared I/O, postconditions as JavaScript), dispatch the kernel on the GPU and verify the contract holds.
 
 **Deliverables:**
 
-- Contract definition format (JSON).
-- Postcondition sandbox — restricted evaluation scope with helper functions (`fix16_mul`, `clamp`, `abs`, `min`, `max`, `eq`, `fail`) and access to `input`, `output`, `globals`, `$` (design params). No filesystem, network, or global state access.
+- Contract definition parsing (JSON).
+- Postcondition sandbox — QuickJS evaluation scope with helper functions (`fix16_mul`, `clamp`, `abs`, `min`, `max`, `eq`, `fail`) and access to `input`, `output`, `globals`, `$` (design params).
 - Schema invariant evaluator — iterates buffer elements, evaluates invariant expressions per-element with fields in scope.
-- Postcondition evaluator — snapshots input buffers, dispatches kernel, evaluates postcondition functions against input snapshot and output.
+- Postcondition evaluator — snapshots input buffers, dispatches kernel on the GPU, evaluates postcondition functions against input snapshot and output.
 - Clean write checker — diffs input buffers pre/post dispatch (exact integer comparison).
-- Test suite using deliberately correct and deliberately broken kernels to confirm the checker catches violations and passes valid kernels.
+- `cargo test` suite using deliberately correct and deliberately broken WGSL kernels to confirm the checker catches violations and passes valid kernels. Every test dispatches on the real GPU — no mocked buffers, no simulated shaders.
 
-**Verification:** Human reviews. Under 800 lines excluding test kernels.
+**Verification:** Human reviews. Under 1200 lines of Rust excluding test kernels.
 
-### Phase 3: The Forge
+### Phase 3: Verification CLI
 
-**Goal:** Wire schemas, contracts, compilation, and verification into a single submission pipeline.
+**Goal:** Wire schemas, contracts, compilation, and verification into the `forge verify` subcommand.
 
 **Deliverables:**
 
-- Forge API: `submit(bundle) → { accepted: true, kernel_id } | { rejected: true, errors: [...] }`.
+- CLI interface: `forge verify bundle.json` → JSON result on stdout.
+- Bundle format: single JSON file containing design params, schemas, contract, WGSL source (inline or path), and adversarial test case descriptions.
 - Full verification pipeline as described in section 3.6.
-- Forge self-test suite: deliberately broken submissions that must be rejected, correct submissions that must be accepted.
-- Kernel registry: accepted kernels stored with their contracts for DAG inclusion.
+- Kernel registry: accepted kernels stored with their contracts (as JSON files in a registry directory) for DAG inclusion.
+- `forge validate-dag manifest.json` — checks DAG structure against registered kernels.
+- Forge self-test suite: deliberately broken submissions that must be rejected, correct submissions that must be accepted. All tests run the full GPU pipeline — compile, dispatch, readback, postcondition evaluation. No shortcuts.
 
-**Verification:** Human reviews the Forge. The Forge then becomes the verification authority for everything built on top of it.
+**Verification:** Human reviews the Forge's behavior via its self-test suite. The test cases are JSON and WGSL — human-readable regardless of the Rust implementation. The Forge then becomes the verification authority for everything built on top of it.
 
 ### Phase 4: DAG Runner
 
-**Goal:** Execute an ordered simulation pipeline of Forge-registered kernels per frame, followed by a render pass.
+**Goal:** Execute an ordered simulation pipeline of Forge-registered kernels per frame.
 
 **Deliverables:**
 
-- DAG manifest format (JSON): ordered pipeline of nodes with explicit dependencies and consume/produce declarations.
-- DAG validator: checks acyclicity, dependency coherence with consume/produce, all kernels Forge-registered, no concurrent write-write hazards.
-- DAG executor: dispatches simulation kernels in declared order, manages physical buffer double-buffering (ping-pong) transparently, dispatches render kernel(s) after pipeline completes.
-- Optional per-frame verification pass: runs all postconditions after each dispatch.
-- Test suite with valid and invalid DAGs.
+- DAG manifest loader and validator: checks acyclicity, dependency coherence with consume/produce, all kernels Forge-registered, no concurrent write-write hazards.
+- DAG executor: dispatches simulation kernels in declared order, manages physical buffer double-buffering (ping-pong) transparently.
+- Development-mode per-frame verification: optionally evaluates all postconditions after each dispatch using the same contract checker from Phase 2.
 
-**Verification:** Verified by the Forge (kernel-level) and DAG validator (graph-level). Human reviews the DAG runner itself.
+**Verification:** Kernels are Forge-verified. DAG structure is Forge-validated. `cargo test` suite with valid and invalid DAGs. Human reviews the DAG runner.
 
-### Phase 5: First Game — The 2D Shooter
+### Phase 5: Game Mode
+
+**Goal:** Add windowing, input handling, and render dispatch to make the DAG runner into a playable game runtime.
+
+**Deliverables:**
+
+- `forge run manifest.json` subcommand: opens a `winit` window, runs the DAG executor in a frame loop.
+- Input capture: keyboard and mouse state written to an InputBuffer each frame via `winit` events.
+- Render dispatch: after simulation pipeline completes, dispatch the render kernel and present the framebuffer to the window surface.
+- Frame timing: fixed or variable timestep with delta_time written to GlobalsBuffer.
+
+**Verification:** Human plays. The game loop is thin glue over already-verified components. Under 400 lines of new Rust.
+
+### Phase 6: First Game — The 2D Shooter
 
 **Goal:** Prove the system works end-to-end by building a playable game entirely from Forge-verified kernels composed into a DAG.
 
@@ -546,9 +571,9 @@ The system must be built bottom-up, with each layer verified before the next is 
 - Forge-verified simulation kernels: spawn, input_to_movement, movement, collision, damage.
 - Render kernel (outside the DAG, dispatched by harness after simulation pipeline).
 - DAG manifest wiring the simulation kernels together.
-- A playable game running in the browser.
+- A playable game: `forge run shooter_manifest.json`.
 
-**Verification:** Every kernel passes the Forge. The DAG passes structural validation. Temporal verification confirms game state consistency over thousands of frames of automated play. Then a human plays it and confirms it's fun enough to be a valid proof of concept.
+**Verification:** Every kernel passes `forge verify`. The DAG passes `forge validate-dag`. Temporal verification confirms game state consistency over thousands of frames of automated play. Then a human plays it and confirms it's fun enough to be a valid proof of concept.
 
 ---
 
@@ -886,13 +911,24 @@ return true;
 
 ## 9. Technology Stack
 
-- **Language:** TypeScript (toolchain and harness), WGSL (kernels)
-- **Runtime:** Bun or browser
-- **GPU API:** WebGPU
-- **Schema format:** JSON
-- **Contract format:** JSON
-- **DAG manifest:** JSON
-- **Test runner:** Built into the Forge (no external test framework dependency)
+**One binary, multiple modes:**
+
+`forge` is a single Rust binary built on `wgpu` (Vulkan/Metal/D3D12/OpenGL — native, no browser) with embedded QuickJS for postcondition evaluation. It operates in three modes:
+
+- `forge verify bundle.json` — verification mode. No window. Compile WGSL, dispatch on GPU, readback, evaluate postconditions, emit JSON result. This is what the AI agent calls.
+- `forge run manifest.json` — game mode. Open a window via `winit`, run the DAG each frame, handle input, render. Optionally evaluate postconditions per-dispatch in development mode.
+- `forge test` — self-test suite. Run all verification tests against known-good and known-bad kernels.
+
+The core — `wgpu` device management, schema-driven buffer allocation, WGSL compilation, kernel dispatch, buffer readback, QuickJS postcondition evaluation — is shared across all three modes. The difference is the outer loop: once-and-report for verification, sixty-times-a-second for gameplay, batch-and-summarize for testing.
+
+- **Language:** Rust (engine and toolchain), WGSL (kernels), JavaScript (postconditions and invariants)
+- **GPU API:** `wgpu` (Vulkan, Metal, D3D12, OpenGL — native, no browser)
+- **JS runtime:** Embedded QuickJS (for postcondition and invariant evaluation)
+- **Windowing:** `winit` (game mode)
+- **Schema/contract/manifest format:** JSON
+- **Test framework:** `cargo test` + Forge self-test suite (real GPU dispatches)
+- **UI layer (future):** CEF embedded in the native window, rendering React to an offscreen texture composited by the render kernel
+- **Browser deployment (future):** Compile to WASM, same WGSL shaders, browser WebGPU API
 
 ---
 
@@ -900,7 +936,7 @@ return true;
 
 1. **Conditional dispatch.** Some kernels only need to run under certain conditions (e.g., spawn every N frames). Currently handled by the kernel early-outing internally based on frame number. For complex games with many expensive conditional kernels, the manifest may need a condition field on nodes so the DAG runner can skip dispatches entirely. Not needed for the shooter proof of concept.
 
-2. **Audio.** Can audio synthesis be done in compute shaders? Likely yes — write PCM samples to a buffer, stream to Web Audio on the CPU side. Needs investigation.
+2. **Audio.** Can audio synthesis be done in compute shaders? Likely yes — write PCM samples to a buffer, stream to a native audio API (e.g., `cpal` in Rust) on the CPU side. Needs investigation.
 
 3. **Persistent state.** Save games are trivial — dump all state buffers to disk. But schema evolution (adding fields to entities in a game update) needs a migration strategy. Design parameter changes that widen or narrow schema constraints also need a migration path.
 
@@ -910,6 +946,10 @@ return true;
 
 6. **Variable-length game data.** Inventories, dialogue trees, quest state, NPC memories — anything that might seem "variable-length" in a CPU architecture is handled here by fixed-size allocation at the schema's declared maximum. If max inventory is 20 slots, every entity gets 20 slots; unused slots are zero. This trades VRAM (which is abundant) for uniform access patterns and predictable memory layout (which the GPU demands). The design parameter system naturally accommodates this: `max_inventory_slots`, `max_quest_slots`, `max_memory_entries` are just design params, and schemas reference them like any other. No indirection, no dynamic allocation, no special cases.
 
+7. **UI layer.** Game UI (menus, HUD, inventory) will be built with web technologies (React) rendered via CEF to an offscreen texture, composited by a render kernel. This preserves hot reload and the web dev workflow while keeping the game fully native. Design work: CEF integration in Rust, texture upload path, input routing between game and UI, compositor kernel contract.
+
+8. **Browser deployment.** The `forge` binary targets native platforms. A future browser deployment path would compile the harness and DAG runner to WASM and use the browser's WebGPU API. The WGSL shaders and JSON artifacts are identical — only the host changes. This is not needed for development or initial release but the architecture should not preclude it.
+
 ---
 
 ## 11. Success Criteria
@@ -917,7 +957,7 @@ return true;
 The engine is considered viable when:
 
 1. The Forge can accept or reject kernel submissions with zero false negatives (never accepts a broken kernel) and minimal false positives (rarely rejects a correct kernel due to overly strict verification).
-2. A non-trivial game (the 2D shooter) runs entirely from Forge-verified kernels composed into a DAG.
-3. An AI agent (Claude Code or equivalent) can author a new kernel, submit it to the Forge, iterate on rejections, and produce a verified kernel — without human intervention in the edit-verify loop.
+2. A non-trivial game (the 2D shooter) runs entirely from Forge-verified kernels composed into a DAG via `forge run`.
+3. An AI agent (Claude Code or equivalent) can author a new kernel, submit it via `forge verify`, iterate on rejections, and produce a verified kernel — without human intervention in the edit-verify loop.
 4. Temporal verification over 10,000 frames of automated play detects zero invariant violations in the shipped game.
-5. The total codebase of the harness, Forge, and DAG runner is under 3,000 lines of TypeScript (excluding kernel source and test cases).
+5. The `forge` binary is under 4,000 lines of Rust (excluding test WGSL and JSON fixtures).

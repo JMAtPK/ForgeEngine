@@ -5,7 +5,7 @@ import fillColorSrc from "./shaders/fill_color.wgsl?raw";
 
 interface TestResult { name: string; pass: boolean; detail: string }
 
-async function initGPU(): Promise<{ adapter: GPUAdapter; device: GPUDevice }> {
+export async function initGPU(): Promise<{ adapter: GPUAdapter; device: GPUDevice }> {
   if (!navigator.gpu) throw new Error("WebGPU not supported in this browser");
   const adapter = await navigator.gpu.requestAdapter();
   if (!adapter) throw new Error("No GPUAdapter found — no compatible GPU?");
@@ -21,11 +21,11 @@ function configureCanvas(device: GPUDevice, canvas: HTMLCanvasElement): GPUCanva
   return ctx;
 }
 
-function createBuffer(device: GPUDevice, size: number, usage: GPUBufferUsageFlags): GPUBuffer {
+export function createBuffer(device: GPUDevice, size: number, usage: GPUBufferUsageFlags): GPUBuffer {
   return device.createBuffer({ size, usage });
 }
 
-async function readbackBuffer(device: GPUDevice, src: GPUBuffer, size: number): Promise<Uint32Array> {
+export async function readbackBuffer(device: GPUDevice, src: GPUBuffer, size: number): Promise<Uint32Array> {
   const staging = createBuffer(device, size, GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST);
   const enc = device.createCommandEncoder();
   enc.copyBufferToBuffer(src, 0, staging, 0, size);
@@ -37,12 +37,12 @@ async function readbackBuffer(device: GPUDevice, src: GPUBuffer, size: number): 
   return result;
 }
 
-function makeComputePipeline(device: GPUDevice, code: string) {
+export function makeComputePipeline(device: GPUDevice, code: string) {
   const module = device.createShaderModule({ code });
   return device.createComputePipeline({ layout: "auto", compute: { module, entryPoint: "main" } });
 }
 
-function dispatchCompute(device: GPUDevice, pipeline: GPUComputePipeline, bindGroup: GPUBindGroup, workgroups: number) {
+export function dispatchCompute(device: GPUDevice, pipeline: GPUComputePipeline, bindGroup: GPUBindGroup, workgroups: number) {
   const enc = device.createCommandEncoder();
   const pass = enc.beginComputePass();
   pass.setPipeline(pipeline);
@@ -186,4 +186,7 @@ async function main() {
   console.log(`\n── Harness: ${results.filter(r => r.pass).length}/${results.length} passed ──`);
 }
 
-main();
+// Only run self-tests when loaded as the entry point (not when imported)
+if (document.getElementById("gpu-canvas")) {
+  main();
+}
