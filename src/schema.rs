@@ -15,12 +15,14 @@ pub fn to_fix16(value: f64) -> i64 {
     (value * 65536.0).round() as i64
 }
 
+#[allow(dead_code)] // core fix16 primitive — used in tests, paired with to_fix16
 pub fn from_fix16(value: i64) -> f64 {
     value as f64 / 65536.0
 }
 
 /// Fixed-point 16.16 multiply. Rust has i64, so we can do this directly.
 /// Matches the WGSL split-half approach in result (but simpler implementation).
+#[allow(dead_code)] // core fix16 primitive — used in tests, verified against WGSL/JS versions
 pub fn fix16_mul(a: i64, b: i64) -> i64 {
     (a * b) >> 16
 }
@@ -53,6 +55,7 @@ pub struct ResolvedParams {
     pub name: String,
     pub raw: HashMap<String, i64>,
     pub display: HashMap<String, f64>,
+    #[allow(dead_code)] // structural metadata — consumed by future type-aware operations
     pub types: HashMap<String, ParamType>,
 }
 
@@ -215,6 +218,7 @@ pub struct ResolvedFieldDef {
     pub name: String,
     pub type_: FieldType,
     pub byte_offset: usize,
+    #[allow(dead_code)] // structural layout metadata — paired with byte_offset
     pub byte_size: usize,
     pub range: Option<ResolvedRange>,
     pub enum_values: Option<Vec<i64>>,

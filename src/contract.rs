@@ -28,6 +28,8 @@ pub struct BufferBinding {
     pub binding: u32,
     pub schema: String,
     pub access: BufferAccess,
+    #[serde(default)]
+    pub alias: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -294,8 +296,8 @@ pub(crate) fn build_element_js_array<'js>(
 pub(crate) fn eval_postcondition<'js>(
     ctx: &rquickjs::Ctx<'js>,
     body: &str,
-    input_arrays: &[(&str, rquickjs::Value<'js>)],
-    output_arrays: &[(&str, rquickjs::Value<'js>)],
+    input_arrays: &[(String, rquickjs::Value<'js>)],
+    output_arrays: &[(String, rquickjs::Value<'js>)],
     params: &ResolvedParams,
 ) -> Result<(), String> {
     // Set up $ with params
@@ -309,28 +311,15 @@ pub(crate) fn eval_postcondition<'js>(
         .set("$", dollar)
         .map_err(|e| format!("$ global: {}", e))?;
 
-    // Set input/output arrays as globals
-    // For simple cases: input = first input, output = first output
-    if let Some((_, val)) = input_arrays.first() {
-        ctx.globals()
-            .set("input", val.clone())
-            .map_err(|e| format!("input global: {}", e))?;
-    }
-    if let Some((_, val)) = output_arrays.first() {
-        ctx.globals()
-            .set("output", val.clone())
-            .map_err(|e| format!("output global: {}", e))?;
-    }
-
-    // Also set named arrays (e.g., globals_in)
+    // Set all named arrays as globals (includes "input"/"output" and aliases)
     for (name, val) in input_arrays {
         ctx.globals()
-            .set(*name, val.clone())
+            .set(name.as_str(), val.clone())
             .map_err(|e| format!("{} global: {}", name, e))?;
     }
     for (name, val) in output_arrays {
         ctx.globals()
-            .set(*name, val.clone())
+            .set(name.as_str(), val.clone())
             .map_err(|e| format!("{} global: {}", name, e))?;
     }
 
@@ -564,16 +553,26 @@ pub fn verify_contract(
                 }
 
                 // Build JS arrays for inputs and outputs
-                let mut input_js: Vec<(&str, rquickjs::Value)> = Vec::new();
-                let mut output_js: Vec<(&str, rquickjs::Value)> = Vec::new();
+                let mut input_js: Vec<(String, rquickjs::Value)> = Vec::new();
+                let mut output_js: Vec<(String, rquickjs::Value)> = Vec::new();
 
                 // Use input snapshots (pre-dispatch) for postcondition evaluation
                 for (snap_idx, (_, snapshot)) in input_snapshots.iter().enumerate() {
                     let schema = input_schemas[snap_idx].1;
                     match build_element_js_array(&ctx, snapshot, schema) {
                         Ok(arr) => {
-                            let name = if snap_idx == 0 { "input" } else { "input_extra" };
-                            input_js.push((name, arr));
+                            let default_name = if snap_idx == 0 { "input" } else { "input_extra" };
+                            input_js.push((default_name.to_string(), arr.clone()));
+                            if let Some(alias) = contract.inputs.get(snap_idx).and_then(|b| b.alias.as_ref()) {
+                                if schema.capacity == 1 {
+                                    // Capacity-1: alias is the singular unwrapped object
+                                    if let Some(elem) = arr.as_array().and_then(|a| a.get::<rquickjs::Value>(0).ok()) {
+                                        input_js.push((alias.clone(), elem));
+                                    }
+                                } else {
+                                    input_js.push((alias.clone(), arr));
+                                }
+                            }
                         }
                         Err(e) => {
                             errors.push(format!(
@@ -589,8 +588,17 @@ pub fn verify_contract(
                         match build_element_js_array(&ctx, &dispatch_result.outputs[out_idx], schema)
                         {
                             Ok(arr) => {
-                                let name = if out_idx == 0 { "output" } else { "output_extra" };
-                                output_js.push((name, arr));
+                                let default_name = if out_idx == 0 { "output" } else { "output_extra" };
+                                output_js.push((default_name.to_string(), arr.clone()));
+                                if let Some(alias) = contract.outputs.get(out_idx).and_then(|b| b.alias.as_ref()) {
+                                    if schema.capacity == 1 {
+                                        if let Some(elem) = arr.as_array().and_then(|a| a.get::<rquickjs::Value>(0).ok()) {
+                                            output_js.push((alias.clone(), elem));
+                                        }
+                                    } else {
+                                        output_js.push((alias.clone(), arr));
+                                    }
+                                }
                             }
                             Err(e) => {
                                 errors.push(format!(
@@ -779,11 +787,13 @@ mod tests {
                 binding: 0,
                 schema: "EntityBuffer".into(),
                 access: BufferAccess::Read,
+                alias: None,
             }],
             outputs: vec![BufferBinding {
                 binding: 1,
                 schema: "EntityBuffer".into(),
                 access: BufferAccess::Write,
+                alias: None,
             }],
             workgroup_size: 64,
             postconditions: vec![
@@ -829,17 +839,20 @@ mod tests {
                     binding: 0,
                     schema: "EntityBuffer".into(),
                     access: BufferAccess::Read,
+                    alias: None,
                 },
                 BufferBinding {
                     binding: 1,
                     schema: "GlobalsBuffer".into(),
                     access: BufferAccess::Read,
+                    alias: None,
                 },
             ],
             outputs: vec![BufferBinding {
                 binding: 2,
                 schema: "EntityBuffer".into(),
                 access: BufferAccess::Write,
+                alias: None,
             }],
             workgroup_size: 64,
             postconditions: vec![
@@ -879,11 +892,13 @@ mod tests {
                 binding: 0,
                 schema: "EntityBuffer".into(),
                 access: BufferAccess::Read,
+                alias: None,
             }],
             outputs: vec![BufferBinding {
                 binding: 1,
                 schema: "EntityBuffer".into(),
                 access: BufferAccess::Write,
+                alias: None,
             }],
             workgroup_size: 64,
             postconditions: vec![],
@@ -923,11 +938,13 @@ mod tests {
                 binding: 0,
                 schema: "EntityBuffer".into(),
                 access: BufferAccess::ReadWrite,
+                alias: None,
             }],
             outputs: vec![BufferBinding {
                 binding: 1,
                 schema: "EntityBuffer".into(),
                 access: BufferAccess::Write,
+                alias: None,
             }],
             workgroup_size: 64,
             postconditions: vec![],
@@ -964,17 +981,20 @@ mod tests {
                     binding: 0,
                     schema: "EntityBuffer".into(),
                     access: BufferAccess::Read,
+                    alias: None,
                 },
                 BufferBinding {
                     binding: 1,
                     schema: "GlobalsBuffer".into(),
                     access: BufferAccess::Read,
+                    alias: None,
                 },
             ],
             outputs: vec![BufferBinding {
                 binding: 2,
                 schema: "EntityBuffer".into(),
                 access: BufferAccess::Write,
+                alias: None,
             }],
             workgroup_size: 64,
             postconditions: vec![],
@@ -1011,17 +1031,20 @@ mod tests {
                     binding: 0,
                     schema: "EntityBuffer".into(),
                     access: BufferAccess::Read,
+                    alias: None,
                 },
                 BufferBinding {
                     binding: 1,
                     schema: "GlobalsBuffer".into(),
                     access: BufferAccess::Read,
+                    alias: None,
                 },
             ],
             outputs: vec![BufferBinding {
                 binding: 2,
                 schema: "EntityBuffer".into(),
                 access: BufferAccess::Write,
+                alias: None,
             }],
             workgroup_size: 64,
             postconditions: vec![

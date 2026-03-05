@@ -34,6 +34,12 @@ enum Command {
         #[arg(long, default_value = ".forge/registry")]
         registry: PathBuf,
     },
+    /// List all verified kernels in the registry
+    List {
+        /// Registry directory (default: .forge/registry)
+        #[arg(long, default_value = ".forge/registry")]
+        registry: PathBuf,
+    },
     /// Validate a DAG manifest
     ValidateDag {
         /// Path to the DAG manifest JSON file
@@ -143,6 +149,32 @@ fn main() {
             println!("{}", serde_json::to_string_pretty(&output).unwrap());
             if !output.accepted {
                 std::process::exit(1);
+            }
+        }
+        Some(Command::List {
+            registry: registry_path,
+        }) => {
+            match registry::list_kernels(&registry_path) {
+                Ok(entries) => {
+                    if entries.is_empty() {
+                        println!("No verified kernels in {}", registry_path.display());
+                    } else {
+                        for entry in &entries {
+                            let n_inputs = entry.contract.inputs.len();
+                            let n_outputs = entry.contract.outputs.len();
+                            let n_post = entry.contract.postconditions.len();
+                            println!(
+                                "  {} ({}i/{}o, {} postconditions)",
+                                entry.name, n_inputs, n_outputs, n_post
+                            );
+                        }
+                        println!("{} kernel(s) registered", entries.len());
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Error: {}", e);
+                    std::process::exit(1);
+                }
             }
         }
         Some(Command::ValidateDag {

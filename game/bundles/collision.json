@@ -1,0 +1,96 @@
+{
+  "design_params": {
+    "name": "shooter_design",
+    "params": {
+      "world_width":          { "type": "fix16", "value": 1280 },
+      "world_height":         { "type": "fix16", "value": 768 },
+      "display_width":        { "type": "u32",   "value": 1280 },
+      "display_height":       { "type": "u32",   "value": 768 },
+      "player_speed":         { "type": "fix16", "value": 200 },
+      "enemy_speed":          { "type": "fix16", "value": 80 },
+      "bullet_speed":         { "type": "fix16", "value": 500 },
+      "max_speed":            { "type": "fix16", "value": 500 },
+      "player_health":        { "type": "u32",   "value": 100 },
+      "enemy_health":         { "type": "u32",   "value": 30 },
+      "boss_health":          { "type": "u32",   "value": 200 },
+      "bullet_damage":        { "type": "u32",   "value": 10 },
+      "bullet_health":        { "type": "u32",   "value": 1 },
+      "max_entities":         { "type": "u32",   "value": 4096 },
+      "enemy_spawn_interval": { "type": "u32",   "value": 60 },
+      "shoot_cooldown":       { "type": "u32",   "value": 10 },
+      "player_size":          { "type": "fix16", "value": 16 },
+      "enemy_size":           { "type": "fix16", "value": 12 },
+      "bullet_size":          { "type": "fix16", "value": 4 },
+      "max_delta_time":       { "type": "fix16", "value": 0.05 }
+    },
+    "design_invariants": [
+      "$.bullet_damage < $.player_health",
+      "$.bullet_damage <= $.enemy_health",
+      "$.boss_health >= $.enemy_health",
+      "$.max_speed >= $.player_speed",
+      "$.max_speed >= $.enemy_speed",
+      "$.max_speed >= $.bullet_speed",
+      "$.max_entities >= 64",
+      "$.display_width % 64 === 0",
+      "$.display_height % 64 === 0"
+    ]
+  },
+  "schemas": [
+    {
+      "name": "EntityBuffer",
+      "struct": {
+        "position":    { "type": "fix16x2", "range": [[0, "$world_width"], [0, "$world_height"]] },
+        "velocity":    { "type": "fix16x2", "range": [["$-max_speed", "$max_speed"], ["$-max_speed", "$max_speed"]] },
+        "size":        { "type": "fix16", "range": [0, "$player_size"] },
+        "health":      { "type": "u32", "range": [0, "$boss_health"] },
+        "max_health":  { "type": "u32", "range": [0, "$boss_health"] },
+        "entity_type": { "type": "u32", "enum": [0, 1, 2, 3] },
+        "damage":      { "type": "u32", "range": [0, "$bullet_damage"] },
+        "alive":       { "type": "u32", "enum": [0, 1] },
+        "cooldown":    { "type": "u32", "range": [0, "$shoot_cooldown"] },
+        "color":       { "type": "u32" }
+      },
+      "capacity": "$max_entities",
+      "buffer_category": "state",
+      "invariants": [
+        "health <= max_health"
+      ]
+    },
+    {
+      "name": "CollisionResultBuffer",
+      "struct": {
+        "entity_a":       { "type": "u32", "range": [0, "$max_entities"] },
+        "entity_b":       { "type": "u32", "range": [0, "$max_entities"] },
+        "collision_type": { "type": "u32", "enum": [0, 1, 2] },
+        "padding":        { "type": "u32" }
+      },
+      "capacity": 8192,
+      "buffer_category": "transient",
+      "invariants": []
+    },
+    {
+      "name": "CollisionCountBuffer",
+      "struct": {
+        "count": { "type": "u32", "range": [0, 8192] }
+      },
+      "capacity": 1,
+      "buffer_category": "transient",
+      "invariants": []
+    }
+  ],
+  "contract": {
+    "name": "collision",
+    "wgsl_path": "../../src/shaders/collision.wgsl",
+    "inputs": [
+      { "binding": 0, "schema": "EntityBuffer", "access": "read", "alias": "entities" }
+    ],
+    "outputs": [
+      { "binding": 1, "schema": "CollisionResultBuffer", "access": "write", "alias": "collisions" },
+      { "binding": 2, "schema": "CollisionCountBuffer",  "access": "write", "alias": "collision_count" }
+    ],
+    "workgroup_size": 64,
+    "postconditions": [
+      "if (collision_count.count > 8192) return fail(0, 'collision count exceeds capacity'); return true;"
+    ]
+  }
+}

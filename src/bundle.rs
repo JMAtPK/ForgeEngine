@@ -225,13 +225,21 @@ pub fn check_struct_layouts(
                 ));
             }
 
-            // Check scalar type
+            // Check scalar type (also accept atomic<T> matching T)
             let member_ty = &module.types[member.ty];
             match &member_ty.inner {
                 naga::TypeInner::Scalar(scalar) => {
                     if !naga_scalar_matches_field_type(*scalar, field.type_) {
                         errors.push(format!(
                             "Binding {} field '{}': type mismatch — shader {:?}, schema {:?}",
+                            binding_num, field.name, scalar.kind, field.type_
+                        ));
+                    }
+                }
+                naga::TypeInner::Atomic(scalar) => {
+                    if !naga_scalar_matches_field_type(*scalar, field.type_) {
+                        errors.push(format!(
+                            "Binding {} field '{}': atomic type mismatch — shader {:?}, schema {:?}",
                             binding_num, field.name, scalar.kind, field.type_
                         ));
                     }

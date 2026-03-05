@@ -2,13 +2,14 @@
 //! compiles kernels, and executes the simulation pipeline.
 
 use crate::contract::{
-    KernelContractJSON, build_element_js_array, eval_postcondition, setup_postcondition_helpers,
+    BufferBinding, KernelContractJSON, build_element_js_array, eval_postcondition,
+    setup_postcondition_helpers,
 };
 use crate::dag::DagNode;
 use crate::registry;
 use crate::schema::{
     BufferCategory, BufferSchemaJSON, DesignParamsJSON, ResolvedParams, ResolvedSchema,
-    generate_random_buffer, read_element, resolve_params, resolve_schema, validate_buffer,
+    read_element, resolve_params, resolve_schema, validate_buffer,
 };
 use rquickjs::{Context, Runtime};
 use serde::Deserialize;
@@ -319,8 +320,8 @@ impl DagRunner {
 
         // Validate DAG structure
         let dag_manifest = crate::dag::DagManifest {
-            name: manifest.design_params.name.clone(),
-            design_params: manifest.design_params.name.clone(),
+            name: params.name.clone(),
+            design_params: params.name.clone(),
             pipeline: manifest.pipeline.clone(),
         };
         let dag_result = crate::dag::validate_dag(&dag_manifest, registry_dir);
@@ -330,11 +331,16 @@ impl DagRunner {
 
         let pool = BufferPool::new(&device, &schemas);
 
-        // Initialize buffers with valid random data
+        // Initialize state and transient buffers with zeros;
+        // input buffers are set by the harness each frame.
         for (name, schema) in &schemas {
-            let data = generate_random_buffer(schema, &params)
-                .map_err(|e| format!("Failed to seed buffer '{}': {}", name, e))?;
-            pool.upload(&queue, name, &data);
+            match schema.buffer_category {
+                BufferCategory::State | BufferCategory::Transient => {
+                    let data = vec![0u8; schema.total_size];
+                    pool.upload(&queue, name, &data);
+                }
+                _ => {}
+            }
         }
 
         // Compile all kernels
@@ -361,6 +367,14 @@ impl DagRunner {
         let mut errors = Vec::new();
         self.frame_count += 1;
 
+        // Zero all transient buffers (e.g. CollisionCountBuffer atomics)
+        for (name, schema) in &self.schemas {
+            if schema.buffer_category == BufferCategory::Transient {
+                let zeros = vec![0u8; schema.total_size];
+                self.pool.upload(&self.queue, name, &zeros);
+            }
+        }
+
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("frame_encoder"),
         });
@@ -375,11 +389,11 @@ impl DagRunner {
                 self.pool.mark_write(&b.schema)?;
             }
 
-            // Determine workgroup dispatch count from first input buffer
+            // Determine workgroup dispatch count from first input buffer capacity
             let mut dispatch_elements = 1u32;
             if let Some(b) = contract.inputs.first() {
                 if let Some(schema) = self.schemas.get(&b.schema) {
-                    dispatch_elements = (schema.total_size as u32) / 4;
+                    dispatch_elements = schema.capacity as u32;
                 }
             }
 
@@ -438,7 +452,8 @@ impl DagRunner {
             for node in &self.pipeline.clone() {
                 let contract = &self.cache.get(&node.kernel).unwrap().contract;
 
-                // Readback output buffers and validate
+                // Readback and validate all output buffers
+                let mut output_data: Vec<(&BufferBinding, Vec<u8>)> = Vec::new();
                 for b in &contract.outputs {
                     if let Some(schema) = self.schemas.get(&b.schema) {
                         let data = self.pool.readback(&self.device, &self.queue, &b.schema)?;
@@ -449,96 +464,119 @@ impl DagRunner {
                                 self.frame_count, node.name, b.schema, e
                             ));
                         }
+                        output_data.push((b, data));
+                    }
+                }
 
-                        // Postcondition eval
-                        if !contract.postconditions.is_empty() {
-                            // Readback inputs for postcondition
-                            let mut input_data: Vec<(&str, Vec<u8>)> = Vec::new();
-                            for ib in &contract.inputs {
-                                let idata =
-                                    self.pool.readback(&self.device, &self.queue, &ib.schema)?;
-                                input_data.push((&ib.schema, idata));
+                // Postcondition eval — once per kernel with ALL buffers
+                if !contract.postconditions.is_empty() {
+                    let mut input_data: Vec<(&BufferBinding, Vec<u8>)> = Vec::new();
+                    for ib in &contract.inputs {
+                        let idata =
+                            self.pool.readback(&self.device, &self.queue, &ib.schema)?;
+                        input_data.push((ib, idata));
+                    }
+
+                    let rt = Runtime::new().expect("QuickJS runtime");
+                    let ctx = Context::full(&rt).expect("QuickJS context");
+
+                    ctx.with(|ctx| {
+                        if let Err(e) = setup_postcondition_helpers(ctx.clone()) {
+                            errors.push(format!("Postcondition setup: {}", e));
+                            return;
+                        }
+
+                        let _ = ctx.eval::<rquickjs::Value, _>(
+                            r#"
+                            function eq(a, b) {
+                                if (a === b) return true;
+                                if (typeof a !== 'object' || typeof b !== 'object') return a === b;
+                                var keys = Object.keys(a);
+                                for (var i = 0; i < keys.length; i++) {
+                                    if (a[keys[i]] !== b[keys[i]]) return false;
+                                }
+                                return true;
                             }
+                            function fail(index, message) {
+                                return { failed: true, index: index, message: message };
+                            }
+                            "#,
+                        );
 
-                            let rt = Runtime::new().expect("QuickJS runtime");
-                            let ctx = Context::full(&rt).expect("QuickJS context");
+                        let mut input_js: Vec<(String, rquickjs::Value)> = Vec::new();
+                        let mut output_js: Vec<(String, rquickjs::Value)> = Vec::new();
 
-                            ctx.with(|ctx| {
-                                if let Err(e) = setup_postcondition_helpers(ctx.clone()) {
-                                    errors.push(format!("Postcondition setup: {}", e));
-                                    return;
-                                }
-
-                                // eq and fail helpers
-                                let _ = ctx.eval::<rquickjs::Value, _>(
-                                    r#"
-                                    function eq(a, b) {
-                                        if (a === b) return true;
-                                        if (typeof a !== 'object' || typeof b !== 'object') return a === b;
-                                        var keys = Object.keys(a);
-                                        for (var i = 0; i < keys.length; i++) {
-                                            if (a[keys[i]] !== b[keys[i]]) return false;
-                                        }
-                                        return true;
-                                    }
-                                    function fail(index, message) {
-                                        return { failed: true, index: index, message: message };
-                                    }
-                                    "#,
-                                );
-
-                                let mut input_js: Vec<(&str, rquickjs::Value)> = Vec::new();
-                                let mut output_js: Vec<(&str, rquickjs::Value)> = Vec::new();
-
-                                for (i, (schema_name, idata)) in
-                                    input_data.iter().enumerate()
-                                {
-                                    if let Some(s) = self.schemas.get(*schema_name) {
-                                        match build_element_js_array(&ctx, idata, s) {
-                                            Ok(arr) => {
-                                                let name = if i == 0 {
-                                                    "input"
-                                                } else {
-                                                    "input_extra"
-                                                };
-                                                input_js.push((name, arr));
-                                            }
-                                            Err(e) => {
-                                                errors.push(format!(
-                                                    "JS array build: {}",
-                                                    e
-                                                ));
+                        for (i, (binding, idata)) in input_data.iter().enumerate() {
+                            if let Some(s) = self.schemas.get(&binding.schema) {
+                                match build_element_js_array(&ctx, idata, s) {
+                                    Ok(arr) => {
+                                        let default_name = if i == 0 {
+                                            "input".to_string()
+                                        } else {
+                                            "input_extra".to_string()
+                                        };
+                                        input_js.push((default_name, arr.clone()));
+                                        if let Some(alias) = binding.alias.as_ref() {
+                                            if s.capacity == 1 {
+                                                if let Some(elem) = arr.as_array().and_then(|a| a.get::<rquickjs::Value>(0).ok()) {
+                                                    input_js.push((alias.clone(), elem));
+                                                }
+                                            } else {
+                                                input_js.push((alias.clone(), arr));
                                             }
                                         }
                                     }
-                                }
-
-                                match build_element_js_array(&ctx, &data, schema) {
-                                    Ok(arr) => output_js.push(("output", arr)),
                                     Err(e) => {
                                         errors.push(format!("JS array build: {}", e));
                                     }
                                 }
+                            }
+                        }
 
-                                for (pc_idx, body) in
-                                    contract.postconditions.iter().enumerate()
-                                {
-                                    if let Err(e) = eval_postcondition(
-                                        &ctx,
-                                        body,
-                                        &input_js,
-                                        &output_js,
-                                        &self.params,
-                                    ) {
-                                        errors.push(format!(
-                                            "Frame {}, node '{}', postcondition {}: {}",
-                                            self.frame_count, node.name, pc_idx, e
-                                        ));
+                        for (i, (binding, odata)) in output_data.iter().enumerate() {
+                            if let Some(s) = self.schemas.get(&binding.schema) {
+                                match build_element_js_array(&ctx, odata, s) {
+                                    Ok(arr) => {
+                                        let default_name = if i == 0 {
+                                            "output".to_string()
+                                        } else {
+                                            "output_extra".to_string()
+                                        };
+                                        output_js.push((default_name, arr.clone()));
+                                        if let Some(alias) = binding.alias.as_ref() {
+                                            if s.capacity == 1 {
+                                                if let Some(elem) = arr.as_array().and_then(|a| a.get::<rquickjs::Value>(0).ok()) {
+                                                    output_js.push((alias.clone(), elem));
+                                                }
+                                            } else {
+                                                output_js.push((alias.clone(), arr));
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        errors.push(format!("JS array build: {}", e));
                                     }
                                 }
-                            });
+                            }
                         }
-                    }
+
+                        for (pc_idx, body) in
+                            contract.postconditions.iter().enumerate()
+                        {
+                            if let Err(e) = eval_postcondition(
+                                &ctx,
+                                body,
+                                &input_js,
+                                &output_js,
+                                &self.params,
+                            ) {
+                                errors.push(format!(
+                                    "Frame {}, node '{}', postcondition {}: {}",
+                                    self.frame_count, node.name, pc_idx, e
+                                ));
+                            }
+                        }
+                    });
                 }
             }
         }
@@ -593,10 +631,6 @@ impl DagRunner {
         self.pool.current_buffer(name)
     }
 
-    pub fn params(&self) -> &ResolvedParams {
-        &self.params
-    }
-
     pub fn compile_kernel(&mut self, contract: &KernelContractJSON) -> Result<(), String> {
         self.cache.compile(&self.device, &contract.name, contract)
     }
@@ -631,13 +665,12 @@ impl DagRunner {
             entries: &bg_entries,
         });
 
-        // Use the largest buffer for dispatch count (covers render kernels
+        // Use the largest buffer capacity for dispatch count (covers render kernels
         // where the output is much larger than the input)
         let mut dispatch_elements = 1u32;
         for b in compiled.contract.inputs.iter().chain(compiled.contract.outputs.iter()) {
             if let Some(schema) = self.schemas.get(&b.schema) {
-                let elems = (schema.total_size as u32) / 4;
-                dispatch_elements = dispatch_elements.max(elems);
+                dispatch_elements = dispatch_elements.max(schema.capacity as u32);
             }
         }
         let workgroups = (dispatch_elements + compiled.contract.workgroup_size - 1) / compiled.contract.workgroup_size;
