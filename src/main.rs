@@ -1,6 +1,7 @@
 mod bundle;
 mod contract;
 mod dag;
+mod dag_runner;
 mod gpu;
 mod registry;
 mod schema;
@@ -42,6 +43,23 @@ enum Command {
     },
     /// Run a compute job
     Run,
+    /// Run a DAG pipeline from a game manifest
+    RunDag {
+        /// Path to the game manifest JSON file
+        manifest: PathBuf,
+        /// Registry directory (default: .forge/registry)
+        #[arg(long, default_value = ".forge/registry")]
+        registry: PathBuf,
+        /// Number of frames to execute
+        #[arg(long, default_value = "1")]
+        frames: usize,
+        /// Enable per-dispatch postcondition verification
+        #[arg(long)]
+        verify: bool,
+        /// Dump final buffer state as JSON to this file
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
 }
 
 fn main() {
@@ -138,6 +156,67 @@ fn main() {
         }
         Some(Command::Run) => {
             println!("forge run: not yet implemented");
+        }
+        Some(Command::RunDag {
+            manifest,
+            registry,
+            frames,
+            verify,
+            output,
+        }) => {
+            let game = match dag_runner::load_game_manifest(&manifest) {
+                Ok(g) => g,
+                Err(e) => {
+                    eprintln!("Error: {}", e);
+                    std::process::exit(1);
+                }
+            };
+
+            let (device, queue) = gpu::init_device(backends);
+            let mut runner = match dag_runner::DagRunner::new(device, queue, &game, &registry) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("Error: {}", e);
+                    std::process::exit(1);
+                }
+            };
+
+            for frame in 1..=frames {
+                match runner.run_frame(verify) {
+                    Ok(result) => {
+                        if !result.passed {
+                            eprintln!("Frame {}: FAIL", result.frame);
+                            for e in &result.errors {
+                                eprintln!("  {}", e);
+                            }
+                            std::process::exit(1);
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Frame {}: error: {}", frame, e);
+                        std::process::exit(1);
+                    }
+                }
+            }
+
+            if let Some(output_path) = output {
+                match runner.dump_buffers() {
+                    Ok(json) => {
+                        let content = serde_json::to_string_pretty(&json).unwrap();
+                        if let Err(e) = std::fs::write(&output_path, content) {
+                            eprintln!("Failed to write output: {}", e);
+                            std::process::exit(1);
+                        }
+                        println!("Output written to {}", output_path.display());
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to dump buffers: {}", e);
+                        std::process::exit(1);
+                    }
+                }
+            }
+
+            println!("forge run-dag: {} frames completed", frames);
         }
     }
 }

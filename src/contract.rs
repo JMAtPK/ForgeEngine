@@ -225,7 +225,7 @@ pub fn dispatch_kernel(
 
 // ===== Postcondition Sandbox =====
 
-fn setup_postcondition_helpers(ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<()> {
+pub(crate) fn setup_postcondition_helpers(ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<()> {
     // fix16_mul
     ctx.globals().set(
         "fix16_mul",
@@ -274,7 +274,7 @@ fn setup_postcondition_helpers(ctx: rquickjs::Ctx<'_>) -> rquickjs::Result<()> {
     Ok(())
 }
 
-fn build_element_js_array<'js>(
+pub(crate) fn build_element_js_array<'js>(
     ctx: &rquickjs::Ctx<'js>,
     buf: &[u8],
     schema: &ResolvedSchema,
@@ -291,7 +291,7 @@ fn build_element_js_array<'js>(
     Ok(arr.into_value())
 }
 
-fn eval_postcondition<'js>(
+pub(crate) fn eval_postcondition<'js>(
     ctx: &rquickjs::Ctx<'js>,
     body: &str,
     input_arrays: &[(&str, rquickjs::Value<'js>)],
